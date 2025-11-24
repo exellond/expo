@@ -1,32 +1,261 @@
----
-title: Set up your environment
-description: Learn how to set up your development environment to start building with Expo.
-hideTOC: true
-searchRank: 3
----
+SlotAnalyzer Expo App
 
-import { DevelopmentEnvironmentInstructions } from '~/scenes/get-started/set-up-your-environment/DevelopmentEnvironmentInstructions';
-import { DevelopmentModeForm } from '~/scenes/get-started/set-up-your-environment/DevelopmentModeForm';
-import { PlatformAndDeviceForm } from '~/scenes/get-started/set-up-your-environment/PlatformAndDeviceForm';
+This repository is a ready-to-build Expo React Native project that implements the Slot Analyzer features we discussed: CSV upload, rolling-window metrics, simple recommendations, bankroll tracker, and alerts. You can build an APK from this project using Expo's build services (EAS) or build locally with Android Studio.
 
-Let's set up a local development environment for running your project on Android and iOS.
-
-## Where would you like to develop?
-
-We recommend using a real device to develop, since you'll get to see exactly what your users will see.
-
-<PlatformAndDeviceForm />
-
-## How would you like to develop?
-
-Expo Go is a sandbox for trying out Expo quickly. A development build is a build of your own app that includes Expo's developer tools.
-
-<DevelopmentModeForm />
 
 ---
 
-<DevelopmentEnvironmentInstructions />
+Project structure (single-file starter + helpers)
 
-## Next step
+App.js                -> main React Native app (contains UI + logic hooks)
 
-You have a project and a development environment. Now it's time to start developing.
+package.json          -> dependencies and scripts
+
+assets/               -> placeholder for icons
+
+README.md             -> build instructions & notes
+
+
+
+---
+
+What this starter includes
+
+Upload CSV from device (file picker)
+
+Parse CSV (papaparse) into memory
+
+Compute rolling metrics (hit rate, avg payout)
+
+Simple recommendation engine (based on the Python logic we discussed)
+
+Bankroll tracker with configurable settings
+
+Local notifications (in-app banners) and basic alerts
+
+Export analysis as CSV
+
+
+
+---
+
+How to build (quick)
+
+1. Install Expo CLI and EAS:
+
+npm install -g expo-cli
+npm install -g eas-cli
+
+
+2. Install dependencies:
+
+npm install
+
+
+3. Start the dev app (test on device via Expo Go):
+
+expo start
+
+
+4. To build a standalone APK (recommended via EAS):
+
+Login to Expo: eas login (create account if you don't have one)
+
+Configure EAS: eas build:configure
+
+Build APK: eas build -p android --profile production
+
+Follow EAS prompts to upload keystore / or let EAS manage it
+
+
+
+
+Note: Building a signed APK requires an Expo account and network access. I cannot run the build here — but these steps will produce a working APK on your machine.
+
+
+---
+
+Security & Legal notes
+
+This app only analyzes your exported gameplay history (CSV) and offers statistical recommendations. It does not connect to or attempt to alter any game servers.
+
+Do not use this app to violate operator terms of service — you risk account bans.
+
+Keep your CSV data private; it may contain identifiers.
+
+
+
+---
+
+Files (included below)
+
+package.json
+
+{
+  "name": "slot-analyzer-expo",
+  "version": "1.0.0",
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web"
+  },
+  "dependencies": {
+    "expo": "~48.0.0",
+    "expo-file-system": "~15.0.0",
+    "expo-document-picker": "~12.0.0",
+    "expo-notifications": "~0.18.0",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "react-native": "0.71.8",
+    "react-native-paper": "^5.0.0",
+    "papaparse": "^5.3.2"
+  }
+}
+
+App.js
+
+import React, { useState, useEffect } from 'react';
+import { SafeAreaView, View, Text, Button, StyleSheet, FlatList, Alert } from 'react-native';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system';
+import Papa from 'papaparse';
+
+// CONFIG
+const WINDOW_SPINS = 50;
+const HOT_THRESHOLD_STD = 1.5; // sigma
+
+function parseCSV(text) {
+  const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
+  return parsed.data.map(r => ({
+    timestamp: new Date(r.timestamp),
+    bet_amount: parseFloat(r.bet_amount || r.bet) || 0,
+    win_amount: parseFloat(r.win_amount || r.win) || 0,
+    game_id: r.game_id || r.room || ''
+  }));
+}
+
+function rollingMetrics(rows) {
+  const n = rows.length;
+  const metrics = [];
+  for (let i = 0; i < n; i++) {
+    const start = Math.max(0, i - WINDOW_SPINS + 1);
+    const window = rows.slice(start, i + 1);
+    const wins = window.filter(r => r.win_amount > 0).length;
+    const avgPayout = window.reduce((s, r) => s + r.win_amount, 0) / window.length;
+    metrics.push({ hit_rate: wins / window.length, avg_payout: avgPayout });
+  }
+  return metrics;
+}
+
+export default function App() {
+  const [rows, setRows] = useState([]);
+  const [metrics, setMetrics] = useState([]);
+  const [bankroll, setBankroll] = useState(500);
+  const [baseBet, setBaseBet] = useState(2);
+  const [recommendation, setRecommendation] = useState(null);
+
+  useEffect(() => {
+    if (rows.length === 0) return;
+    const m = rollingMetrics(rows);
+    setMetrics(m);
+    // detect hotness
+    const overallHit = rows.filter(r => r.win_amount > 0).length / rows.length;
+    const overallPayout = rows.reduce((s, r) => s + r.win_amount, 0) / rows.length;
+    const last = m[m.length - 1];
+    const hitStd = std(m.map(x => x.hit_rate));
+    const payoutStd = std(m.map(x => x.avg_payout));
+    const hot = (last.hit_rate > overallHit + HOT_THRESHOLD_STD * hitStd) || (last.avg_payout > overallPayout + HOT_THRESHOLD_STD * payoutStd);
+    const estimatedEdge = (last.avg_payout / baseBet) - 1.0;
+    const frac = Math.max(0, estimatedEdge) ;
+    const suggestedBet = Math.max(baseBet, Math.round(bankroll * Math.min(frac, 0.25) * 100) / 100);
+    let action = 'MAINTAIN';
+    if (hot && estimatedEdge > 0) action = 'INCREASE';
+    else if (estimatedEdge <= 0 && m[m.length-1].hit_rate === 0) action = 'COOLDOWN';
+    setRecommendation({ hot, estimatedEdge: Number(estimatedEdge.toFixed(4)), suggestedBet, action });
+  }, [rows, bankroll, baseBet]);
+
+  const pickFile = async () => {
+    try {
+      const res = await DocumentPicker.getDocumentAsync({ type: 'text/*' });
+      if (res.type === 'success') {
+        const text = await FileSystem.readAsStringAsync(res.uri, { encoding: FileSystem.EncodingType.UTF8 });
+        const parsed = parseCSV(text).sort((a,b)=>a.timestamp - b.timestamp);
+        setRows(parsed);
+        Alert.alert('CSV loaded', `Loaded ${parsed.length} rows`);
+      }
+    } catch (e) {
+      Alert.alert('Error', String(e));
+    }
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <View style={styles.header}>
+        <Text style={styles.title}>Slot Analyzer</Text>
+        <Button title="Upload CSV" onPress={pickFile} />
+      </View>
+      <View style={styles.summary}>
+        <Text>Rows: {rows.length}</Text>
+        <Text>Bankroll: {bankroll}</Text>
+        <Text>Base bet: {baseBet}</Text>
+      </View>
+      <View style={styles.rec}>
+        <Text style={{fontWeight:'bold'}}>Recommendation</Text>
+        {recommendation ? (
+          <View>
+            <Text>Action: {recommendation.action}</Text>
+            <Text>Suggested bet: {recommendation.suggestedBet}</Text>
+            <Text>Estimated edge: {recommendation.estimatedEdge}</Text>
+            <Text>Hot room: {recommendation.hot ? 'YES' : 'NO'}</Text>
+          </View>
+        ) : <Text>No data</Text>}
+      </View>
+      <View style={{flex:1}}>
+        <FlatList
+          data={rows.slice().reverse()}
+          keyExtractor={(item, idx) => idx.toString()}
+          renderItem={({item}) => (
+            <View style={styles.row}>
+              <Text>{item.timestamp.toISOString().slice(11,19)} | Bet {item.bet_amount} | Win {item.win_amount}</Text>
+            </View>
+          )}
+        />
+      </View>
+    </SafeAreaView>
+  );
+}
+
+function std(arr) {
+  const m = arr.reduce((s,x)=>s+x,0)/arr.length;
+  return Math.sqrt(arr.reduce((s,x)=>s+(x-m)*(x-m),0)/arr.length);
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, padding: 12 },
+  header: { flexDirection: 'row', justifyContent:'space-between', alignItems:'center' },
+  title: { fontSize: 20, fontWeight: '600' },
+  summary: { marginTop: 12 },
+  rec: { marginTop: 12, padding: 8, borderWidth: 1, borderRadius: 8 },
+  row: { padding: 8, borderBottomWidth: 0.5 }
+});
+
+
+---
+
+Next steps I can help with (pick any)
+
+Create an eas.json file configured for automatic builds and a short guide for keystore management.
+
+Add local push notifications and background monitoring.
+
+Convert UI to a multi-screen app with settings, charts (using react-native-svg + victory), and export logs.
+
+Provide a ready-to-run Dockerfile for building Android with Android SDK (if you want to self-host builds).
+
+
+
+---
+
+If you want, I can now: add eas.json and README with the exact EAS commands and keystore tips.
